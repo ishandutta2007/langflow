@@ -1,14 +1,15 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
 
 from langflow.graph.schema import RunOutputs
 from langflow.schema import dotdict
-from langflow.schema.schema import InputType, OutputType
+from langflow.schema.graph import Tweaks
+from langflow.schema.schema import InputType, OutputLog, OutputType
 from langflow.services.database.models.api_key.model import ApiKeyRead
 from langflow.services.database.models.base import orjson_dumps
 from langflow.services.database.models.flow import FlowCreate, FlowRead
@@ -25,7 +26,7 @@ class BuildStatus(Enum):
 
 
 class TweaksRequest(BaseModel):
-    tweaks: Optional[Dict[str, Dict[str, str]]] = Field(default_factory=dict)
+    tweaks: Optional[Dict[str, Dict[str, Any]]] = Field(default_factory=dict)
 
 
 class UpdateTemplateRequest(BaseModel):
@@ -138,8 +139,18 @@ class FlowListCreate(BaseModel):
     flows: List[FlowCreate]
 
 
+class FlowListIds(BaseModel):
+    flow_ids: List[str]
+
+
 class FlowListRead(BaseModel):
     flows: List[FlowRead]
+
+
+class FlowListReadWithFolderName(BaseModel):
+    flows: List[FlowRead]
+    name: str
+    description: str
 
 
 class InitResponse(BaseModel):
@@ -169,6 +180,11 @@ class CustomComponentRequest(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     code: str
     frontend_node: Optional[dict] = None
+
+
+class CustomComponentResponse(BaseModel):
+    data: dict
+    type: str
 
 
 class UpdateCustomComponentRequest(CustomComponentRequest):
@@ -234,9 +250,12 @@ class VerticesOrderResponse(BaseModel):
 
 class ResultDataResponse(BaseModel):
     results: Optional[Any] = Field(default_factory=dict)
+    outputs: dict[str, OutputLog] = Field(default_factory=dict)
+    message: Optional[Any] = Field(default_factory=dict)
     artifacts: Optional[Any] = Field(default_factory=dict)
     timedelta: Optional[float] = None
     duration: Optional[str] = None
+    used_frozen_result: Optional[bool] = False
 
 
 class VertexBuildResponse(BaseModel):
@@ -249,7 +268,7 @@ class VertexBuildResponse(BaseModel):
     """JSON string of the params."""
     data: ResultDataResponse
     """Mapping of vertex ids to result dict containing the param name and result value."""
-    timestamp: Optional[datetime] = Field(default_factory=datetime.utcnow)
+    timestamp: Optional[datetime] = Field(default_factory=lambda: datetime.now(timezone.utc))
     """Timestamp of the build."""
 
 
@@ -283,38 +302,8 @@ class InputValueRequest(BaseModel):
     )
 
 
-class Tweaks(RootModel):
-    root: dict[str, Union[str, dict[str, str]]] = Field(
-        description="A dictionary of tweaks to adjust the flow's execution. Allows customizing flow behavior dynamically. All tweaks are overridden by the input values.",
-    )
-    model_config = {
-        "json_schema_extra": {
-            "examples": [
-                {
-                    "parameter_name": "value",
-                    "Component Name": {"parameter_name": "value"},
-                    "component_id": {"parameter_name": "value"},
-                }
-            ]
-        }
-    }
-
-    # This should behave like a dict
-    def __getitem__(self, key):
-        return self.root[key]
-
-    def __setitem__(self, key, value):
-        self.root[key] = value
-
-    def __delitem__(self, key):
-        del self.root[key]
-
-    def items(self):
-        return self.root.items()
-
-
 class SimplifiedAPIRequest(BaseModel):
-    input_value: Optional[str] = Field(default="", description="The input value")
+    input_value: Optional[str] = Field(default=None, description="The input value")
     input_type: Optional[InputType] = Field(default="chat", description="The input type")
     output_type: Optional[OutputType] = Field(default="chat", description="The output type")
     output_component: Optional[str] = Field(
@@ -323,3 +312,19 @@ class SimplifiedAPIRequest(BaseModel):
     )
     tweaks: Optional[Tweaks] = Field(default=None, description="The tweaks")
     session_id: Optional[str] = Field(default=None, description="The session id")
+
+
+# (alias) type ReactFlowJsonObject<NodeData = any, EdgeData = any> = {
+#     nodes: Node<NodeData>[];
+#     edges: Edge<EdgeData>[];
+#     viewport: Viewport;
+# }
+# import ReactFlowJsonObject
+class FlowDataRequest(BaseModel):
+    nodes: List[dict]
+    edges: List[dict]
+    viewport: Optional[dict] = None
+
+
+class ConfigResponse(BaseModel):
+    frontend_timeout: int

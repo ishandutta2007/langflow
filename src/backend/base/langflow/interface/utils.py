@@ -5,7 +5,7 @@ import re
 from io import BytesIO
 
 import yaml
-from langchain.base_language import BaseLanguageModel
+from langchain_core.language_models import BaseLanguageModel
 from loguru import logger
 from PIL.Image import Image
 
@@ -93,7 +93,7 @@ def setup_llm_caching():
     try:
         set_langchain_cache(settings_service.settings)
     except ImportError:
-        logger.warning(f"Could not import {settings_service.settings.CACHE_TYPE}. ")
+        logger.warning(f"Could not import {settings_service.settings.cache_type}. ")
     except Exception as exc:
         logger.warning(f"Could not setup LLM caching. Error: {exc}")
 
@@ -105,7 +105,7 @@ def set_langchain_cache(settings):
 
     if cache_type := os.getenv("LANGFLOW_LANGCHAIN_CACHE"):
         try:
-            cache_class = import_class(f"langchain.cache.{cache_type or settings.LANGCHAIN_CACHE}")
+            cache_class = import_class(f"langchain_community.cache.{cache_type or settings.LANGCHAIN_CACHE}")
 
             logger.debug(f"Setting up LLM caching with {cache_class.__name__}")
             set_llm_cache(cache_class())

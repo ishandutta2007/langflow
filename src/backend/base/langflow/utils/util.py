@@ -2,13 +2,16 @@ import importlib
 import inspect
 import re
 from functools import wraps
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from docstring_parser import parse
 
-from langflow.schema.schema import Record
+from langflow.schema import Data
+from langflow.services.deps import get_settings_service
 from langflow.template.frontend_node.constants import FORCE_SHOW_FIELDS
 from langflow.utils import constants
+from langflow.utils.logger import logger
 
 
 def unescape_string(s: str):
@@ -59,54 +62,6 @@ def build_template_from_function(name: str, type_to_loader_dict: Dict, add_funct
             if add_function:
                 base_classes.append("Callable")
 
-            return {
-                "template": format_dict(variables, name),
-                "description": docs.short_description or "",
-                "base_classes": base_classes,
-            }
-
-
-def build_template_from_class(name: str, type_to_cls_dict: Dict, add_function: bool = False):
-    classes = [item.__name__ for item in type_to_cls_dict.values()]
-
-    # Raise error if name is not in chains
-    if name not in classes:
-        raise ValueError(f"{name} not found.")
-
-    for _type, v in type_to_cls_dict.items():
-        if v.__name__ == name:
-            _class = v
-
-            # Get the docstring
-            docs = parse(_class.__doc__)
-
-            variables = {"_type": _type}
-
-            if "__fields__" in _class.__dict__:
-                for class_field_items, value in _class.__fields__.items():
-                    if class_field_items in ["callback_manager"]:
-                        continue
-                    variables[class_field_items] = {}
-                    for name_, value_ in value.__repr_args__():
-                        if name_ == "default_factory":
-                            try:
-                                variables[class_field_items]["default"] = get_default_factory(
-                                    module=_class.__base__.__module__,
-                                    function=value_,
-                                )
-                            except Exception:
-                                variables[class_field_items]["default"] = None
-                        elif name_ not in ["name"]:
-                            variables[class_field_items][name_] = value_
-
-                    variables[class_field_items]["placeholder"] = (
-                        docs.params[class_field_items] if class_field_items in docs.params else ""
-                    )
-            base_classes = get_base_classes(_class)
-            # Adding function to base classes to allow
-            # the output to be a function
-            if add_function:
-                base_classes.append("Callable")
             return {
                 "template": format_dict(variables, name),
                 "description": docs.short_description or "",
@@ -445,20 +400,59 @@ def add_options_to_field(value: Dict[str, Any], class_name: Optional[str], key: 
         value["value"] = options_map[class_name][0]
 
 
-def build_loader_repr_from_records(records: List[Record]) -> str:
+def build_loader_repr_from_data(data: List[Data]) -> str:
     """
-    Builds a string representation of the loader based on the given records.
+    Builds a string representation of the loader based on the given data.
 
     Args:
-        records (List[Record]): A list of records.
+        data (List[Data]): A list of data.
 
     Returns:
         str: A string representation of the loader.
 
     """
-    if records:
-        avg_length = sum(len(doc.text) for doc in records) / len(records)
-        return f"""{len(records)} records
-        \nAvg. Record Length (characters): {int(avg_length)}
-        Records: {records[:3]}..."""
-    return "0 records"
+    if data:
+        avg_length = sum(len(doc.text) for doc in data) / len(data)
+        return f"""{len(data)} data
+        \nAvg. Data Length (characters): {int(avg_length)}
+        Data: {data[:3]}..."""
+    return "0 data"
+
+
+def update_settings(
+    config: Optional[str] = None,
+    cache: Optional[str] = None,
+    dev: bool = False,
+    remove_api_keys: bool = False,
+    components_path: Optional[Path] = None,
+    store: bool = True,
+):
+    """Update the settings from a config file."""
+    from langflow.services.utils import initialize_settings_service
+
+    # Check for database_url in the environment variables
+
+    initialize_settings_service()
+    settings_service = get_settings_service()
+    if config:
+        logger.debug(f"Loading settings from {config}")
+        settings_service.settings.update_from_yaml(config, dev=dev)
+    if remove_api_keys:
+        logger.debug(f"Setting remove_api_keys to {remove_api_keys}")
+        settings_service.settings.update_settings(remove_api_keys=remove_api_keys)
+    if cache:
+        logger.debug(f"Setting cache to {cache}")
+        settings_service.settings.update_settings(cache=cache)
+    if components_path:
+        logger.debug(f"Adding component path {components_path}")
+        settings_service.settings.update_settings(components_path=components_path)
+    if not store:
+        logger.debug("Setting store to False")
+        settings_service.settings.update_settings(store=False)
+
+
+def is_class_method(func, cls):
+    """
+    Check if a function is a class method.
+    """
+    return inspect.ismethod(func) and func.__self__ is cls.__class__

@@ -1,4 +1,6 @@
 import json
+import os.path
+import shutil
 
 # we need to import tmpdir
 import tempfile
@@ -8,6 +10,7 @@ from typing import TYPE_CHECKING, AsyncGenerator
 
 import orjson
 import pytest
+from dotenv import load_dotenv
 from fastapi.testclient import TestClient
 from httpx import AsyncClient
 from sqlmodel import Session, SQLModel, create_engine, select
@@ -19,6 +22,7 @@ from langflow.initial_setup.setup import STARTER_FOLDER_NAME
 from langflow.services.auth.utils import get_password_hash
 from langflow.services.database.models.api_key.model import ApiKey
 from langflow.services.database.models.flow.model import Flow, FlowCreate
+from langflow.services.database.models.folder.model import Folder
 from langflow.services.database.models.user.model import User, UserCreate
 from langflow.services.database.utils import session_getter
 from langflow.services.deps import get_db_service
@@ -27,32 +31,47 @@ if TYPE_CHECKING:
     from langflow.services.database.service import DatabaseService
 
 
-def pytest_configure():
-    pytest.BASIC_EXAMPLE_PATH = Path(__file__).parent.absolute() / "data" / "basic_example.json"
-    pytest.COMPLEX_EXAMPLE_PATH = Path(__file__).parent.absolute() / "data" / "complex_example.json"
-    pytest.COMPLEX_DEPS_EXAMPLE_PATH = Path(__file__).parent.absolute() / "data" / "complex_deps_example.json"
-    pytest.OPENAPI_EXAMPLE_PATH = Path(__file__).parent.absolute() / "data" / "Openapi.json"
-    pytest.GROUPED_CHAT_EXAMPLE_PATH = Path(__file__).parent.absolute() / "data" / "grouped_chat.json"
-    pytest.ONE_GROUPED_CHAT_EXAMPLE_PATH = Path(__file__).parent.absolute() / "data" / "one_group_chat.json"
-    pytest.VECTOR_STORE_GROUPED_EXAMPLE_PATH = Path(__file__).parent.absolute() / "data" / "vector_store_grouped.json"
+load_dotenv()
 
-    pytest.BASIC_CHAT_WITH_PROMPT_AND_HISTORY = (
-        Path(__file__).parent.absolute() / "data" / "BasicChatWithPromptAndHistory.json"
-    )
-    pytest.CHAT_INPUT = Path(__file__).parent.absolute() / "data" / "ChatInputTest.json"
-    pytest.TWO_OUTPUTS = Path(__file__).parent.absolute() / "data" / "TwoOutputsTest.json"
-    pytest.VECTOR_STORE_PATH = Path(__file__).parent.absolute() / "data" / "Vector_store.json"
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "noclient: don't create a client for this test")
+    config.addinivalue_line("markers", "load_flows: load the flows for this test")
+    config.addinivalue_line("markers", "api_key_required: run only if the api key is set in the environment variables")
+    data_path = Path(__file__).parent.absolute() / "data"
+
+    pytest.BASIC_EXAMPLE_PATH = data_path / "basic_example.json"
+    pytest.COMPLEX_EXAMPLE_PATH = data_path / "complex_example.json"
+    pytest.OPENAPI_EXAMPLE_PATH = data_path / "Openapi.json"
+    pytest.GROUPED_CHAT_EXAMPLE_PATH = data_path / "grouped_chat.json"
+    pytest.ONE_GROUPED_CHAT_EXAMPLE_PATH = data_path / "one_group_chat.json"
+    pytest.VECTOR_STORE_GROUPED_EXAMPLE_PATH = data_path / "vector_store_grouped.json"
+    pytest.WEBHOOK_TEST = data_path / "WebhookTest.json"
+
+    pytest.BASIC_CHAT_WITH_PROMPT_AND_HISTORY = data_path / "BasicChatwithPromptandHistory.json"
+    pytest.CHAT_INPUT = data_path / "ChatInputTest.json"
+    pytest.TWO_OUTPUTS = data_path / "TwoOutputsTest.json"
+    pytest.VECTOR_STORE_PATH = data_path / "Vector_store.json"
+    pytest.SIMPLE_API_TEST = data_path / "SimpleAPITest.json"
     pytest.CODE_WITH_SYNTAX_ERROR = """
 def get_text():
     retun "Hello World"
     """
 
-
-@pytest.fixture(autouse=True)
-def check_openai_api_key_in_environment_variables():
-    import os
-
-    assert os.environ.get("OPENAI_API_KEY") is not None, "OPENAI_API_KEY is not set in environment variables"
+    # validate that all the paths are correct and the files exist
+    for path in [
+        pytest.BASIC_EXAMPLE_PATH,
+        pytest.COMPLEX_EXAMPLE_PATH,
+        pytest.OPENAPI_EXAMPLE_PATH,
+        pytest.GROUPED_CHAT_EXAMPLE_PATH,
+        pytest.ONE_GROUPED_CHAT_EXAMPLE_PATH,
+        pytest.VECTOR_STORE_GROUPED_EXAMPLE_PATH,
+        pytest.BASIC_CHAT_WITH_PROMPT_AND_HISTORY,
+        pytest.CHAT_INPUT,
+        pytest.TWO_OUTPUTS,
+        pytest.VECTOR_STORE_PATH,
+    ]:
+        assert path.exists(), f"File {path} does not exist. Available files: {list(data_path.iterdir())}"
 
 
 @pytest.fixture()
@@ -75,6 +94,12 @@ def session_fixture():
 class Config:
     broker_url = "redis://localhost:6379/0"
     result_backend = "redis://localhost:6379/0"
+
+
+@pytest.fixture(name="load_flows_dir")
+def load_flows_dir():
+    tempdir = tempfile.TemporaryDirectory()
+    yield tempdir.name
 
 
 @pytest.fixture(name="distributed_env")
@@ -188,41 +213,52 @@ def json_flow_with_prompt_and_history():
 
 
 @pytest.fixture
+def json_simple_api_test():
+    with open(pytest.SIMPLE_API_TEST, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
 def json_vector_store():
     with open(pytest.VECTOR_STORE_PATH, "r") as f:
         return f.read()
 
 
 @pytest.fixture
-def complex_graph_with_groups():
-    with open(pytest.COMPLEX_DEPS_EXAMPLE_PATH, "r") as f:
-        flow_graph = json.load(f)
-    data_graph = flow_graph["data"]
-    nodes = data_graph["nodes"]
-    edges = data_graph["edges"]
-    return Graph(nodes, edges)
+def json_webhook_test():
+    with open(pytest.WEBHOOK_TEST, "r") as f:
+        return f.read()
 
 
 @pytest.fixture(name="client", autouse=True)
-def client_fixture(session: Session, monkeypatch):
+def client_fixture(session: Session, monkeypatch, request, load_flows_dir):
     # Set the database url to a test database
-    db_dir = tempfile.mkdtemp()
-    db_path = Path(db_dir) / "test.db"
-    monkeypatch.setenv("LANGFLOW_DATABASE_URL", f"sqlite:///{db_path}")
-    monkeypatch.setenv("LANGFLOW_AUTO_LOGIN", "false")
+    if "noclient" in request.keywords:
+        yield
+    else:
+        db_dir = tempfile.mkdtemp()
+        db_path = Path(db_dir) / "test.db"
+        monkeypatch.setenv("LANGFLOW_DATABASE_URL", f"sqlite:///{db_path}")
+        monkeypatch.setenv("LANGFLOW_AUTO_LOGIN", "false")
+        if "load_flows" in request.keywords:
+            shutil.copyfile(
+                pytest.BASIC_EXAMPLE_PATH, os.path.join(load_flows_dir, "c54f9130-f2fa-4a3e-b22a-3856d946351b.json")
+            )
+            monkeypatch.setenv("LANGFLOW_LOAD_FLOWS_PATH", load_flows_dir)
+            monkeypatch.setenv("LANGFLOW_AUTO_LOGIN", "true")
 
-    from langflow.main import create_app
+        from langflow.main import create_app
 
-    app = create_app()
+        app = create_app()
 
-    # app.dependency_overrides[get_session] = get_session_override
-    with TestClient(app) as client:
-        yield client
-    # app.dependency_overrides.clear()
-    monkeypatch.undo()
-    # clear the temp db
-    with suppress(FileNotFoundError):
-        db_path.unlink()
+        # app.dependency_overrides[get_session] = get_session_override
+        with TestClient(app) as client:
+            yield client
+        # app.dependency_overrides.clear()
+        monkeypatch.undo()
+        # clear the temp db
+        with suppress(FileNotFoundError):
+            db_path.unlink()
 
 
 # create a fixture for session_getter above
@@ -247,7 +283,7 @@ def test_user(client):
         username="testuser",
         password="testpassword",
     )
-    response = client.post("/api/v1/users", json=user_data.dict())
+    response = client.post("/api/v1/users", json=user_data.model_dump())
     assert response.status_code == 201
     return response.json()
 
@@ -314,7 +350,7 @@ def added_flow_with_prompt_and_history(client, json_flow_with_prompt_and_history
     flow = orjson.loads(json_flow_with_prompt_and_history)
     data = flow["data"]
     flow = FlowCreate(name="Basic Chat", description="description", data=data)
-    response = client.post("api/v1/flows/", json=flow.dict(), headers=logged_in_headers)
+    response = client.post("api/v1/flows/", json=flow.model_dump(), headers=logged_in_headers)
     assert response.status_code == 201
     assert response.json()["name"] == flow.name
     assert response.json()["data"] == flow.data
@@ -326,7 +362,7 @@ def added_flow_chat_input(client, json_chat_input, logged_in_headers):
     flow = orjson.loads(json_chat_input)
     data = flow["data"]
     flow = FlowCreate(name="Chat Input", description="description", data=data)
-    response = client.post("api/v1/flows/", json=flow.dict(), headers=logged_in_headers)
+    response = client.post("api/v1/flows/", json=flow.model_dump(), headers=logged_in_headers)
     assert response.status_code == 201
     assert response.json()["name"] == flow.name
     assert response.json()["data"] == flow.data
@@ -338,7 +374,7 @@ def added_flow_two_outputs(client, json_two_outputs, logged_in_headers):
     flow = orjson.loads(json_two_outputs)
     data = flow["data"]
     flow = FlowCreate(name="Two Outputs", description="description", data=data)
-    response = client.post("api/v1/flows/", json=flow.dict(), headers=logged_in_headers)
+    response = client.post("api/v1/flows/", json=flow.model_dump(), headers=logged_in_headers)
     assert response.status_code == 201
     assert response.json()["name"] == flow.name
     assert response.json()["data"] == flow.data
@@ -350,10 +386,24 @@ def added_vector_store(client, json_vector_store, logged_in_headers):
     vector_store = orjson.loads(json_vector_store)
     data = vector_store["data"]
     vector_store = FlowCreate(name="Vector Store", description="description", data=data)
-    response = client.post("api/v1/flows/", json=vector_store.dict(), headers=logged_in_headers)
+    response = client.post("api/v1/flows/", json=vector_store.model_dump(), headers=logged_in_headers)
     assert response.status_code == 201
     assert response.json()["name"] == vector_store.name
     assert response.json()["data"] == vector_store.data
+    return response.json()
+
+
+@pytest.fixture
+def added_webhook_test(client, json_webhook_test, logged_in_headers):
+    webhook_test = orjson.loads(json_webhook_test)
+    data = webhook_test["data"]
+    webhook_test = FlowCreate(
+        name="Webhook Test", description="description", data=data, endpoint_name=webhook_test["endpoint_name"]
+    )
+    response = client.post("api/v1/flows/", json=webhook_test.model_dump(), headers=logged_in_headers)
+    assert response.status_code == 201
+    assert response.json()["name"] == webhook_test.name
+    assert response.json()["data"] == webhook_test.data
     return response.json()
 
 
@@ -376,12 +426,28 @@ def created_api_key(active_user):
     return api_key
 
 
+@pytest.fixture(name="simple_api_test")
+def get_simple_api_test(client, logged_in_headers, json_simple_api_test):
+    # Once the client is created, we can get the starter project
+    # Just create a new flow with the simple api test
+    flow = orjson.loads(json_simple_api_test)
+    data = flow["data"]
+    flow = FlowCreate(name="Simple API Test", data=data, description="Simple API Test")
+    response = client.post("api/v1/flows/", json=flow.model_dump(), headers=logged_in_headers)
+    assert response.status_code == 201
+    assert response.json()["name"] == flow.name
+    assert response.json()["data"] == flow.data
+    return response.json()
+
+
 @pytest.fixture(name="starter_project")
 def get_starter_project(active_user):
     # once the client is created, we can get the starter project
     with session_getter(get_db_service()) as session:
         flow = session.exec(
-            select(Flow).where(Flow.folder == STARTER_FOLDER_NAME).where(Flow.name == "Basic Prompting (Hello, world!)")
+            select(Flow)
+            .where(Flow.folder.has(Folder.name == STARTER_FOLDER_NAME))
+            .where(Flow.name == "Basic Prompting (Hello, World)")
         ).first()
         if not flow:
             raise ValueError("No starter project found")

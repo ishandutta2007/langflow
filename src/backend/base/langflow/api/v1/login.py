@@ -9,8 +9,10 @@ from langflow.services.auth.utils import (
     create_user_longterm_token,
     create_user_tokens,
 )
-from langflow.services.deps import get_session, get_settings_service
-from langflow.services.settings.manager import SettingsService
+from langflow.services.database.models.folder.utils import create_default_folder_if_it_doesnt_exist
+from langflow.services.deps import get_session, get_settings_service, get_variable_service
+from langflow.services.settings.service import SettingsService
+from langflow.services.variable.service import VariableService
 
 router = APIRouter(tags=["Login"])
 
@@ -22,6 +24,7 @@ async def login_to_get_access_token(
     db: Session = Depends(get_session),
     # _: Session = Depends(get_current_active_user)
     settings_service=Depends(get_settings_service),
+    variable_service: VariableService = Depends(get_variable_service),
 ):
     auth_settings = settings_service.auth_settings
     try:
@@ -43,6 +46,7 @@ async def login_to_get_access_token(
             samesite=auth_settings.REFRESH_SAME_SITE,
             secure=auth_settings.REFRESH_SECURE,
             expires=auth_settings.REFRESH_TOKEN_EXPIRE_SECONDS,
+            domain=auth_settings.COOKIE_DOMAIN,
         )
         response.set_cookie(
             "access_token_lf",
@@ -51,7 +55,11 @@ async def login_to_get_access_token(
             samesite=auth_settings.ACCESS_SAME_SITE,
             secure=auth_settings.ACCESS_SECURE,
             expires=auth_settings.ACCESS_TOKEN_EXPIRE_SECONDS,
+            domain=auth_settings.COOKIE_DOMAIN,
         )
+        variable_service.initialize_user_variables(user.id, db)
+        # Create default folder for user if it doesn't exist
+        create_default_folder_if_it_doesnt_exist(db, user.id)
         return tokens
     else:
         raise HTTPException(
@@ -63,13 +71,11 @@ async def login_to_get_access_token(
 
 @router.get("/auto_login")
 async def auto_login(
-    response: Response,
-    db: Session = Depends(get_session),
-    settings_service=Depends(get_settings_service),
+    response: Response, db: Session = Depends(get_session), settings_service=Depends(get_settings_service)
 ):
     auth_settings = settings_service.auth_settings
     if settings_service.auth_settings.AUTO_LOGIN:
-        tokens = create_user_longterm_token(db)
+        user_id, tokens = create_user_longterm_token(db)
         response.set_cookie(
             "access_token_lf",
             tokens["access_token"],
@@ -77,7 +83,9 @@ async def auto_login(
             samesite=auth_settings.ACCESS_SAME_SITE,
             secure=auth_settings.ACCESS_SECURE,
             expires=None,  # Set to None to make it a session cookie
+            domain=auth_settings.COOKIE_DOMAIN,
         )
+
         return tokens
 
     raise HTTPException(
@@ -91,7 +99,9 @@ async def auto_login(
 
 @router.post("/refresh")
 async def refresh_token(
-    request: Request, response: Response, settings_service: "SettingsService" = Depends(get_settings_service)
+    request: Request,
+    response: Response,
+    settings_service: "SettingsService" = Depends(get_settings_service),
 ):
     auth_settings = settings_service.auth_settings
 
@@ -106,6 +116,7 @@ async def refresh_token(
             samesite=auth_settings.REFRESH_SAME_SITE,
             secure=auth_settings.REFRESH_SECURE,
             expires=auth_settings.REFRESH_TOKEN_EXPIRE_SECONDS,
+            domain=auth_settings.COOKIE_DOMAIN,
         )
         response.set_cookie(
             "access_token_lf",
@@ -114,6 +125,7 @@ async def refresh_token(
             samesite=auth_settings.ACCESS_SAME_SITE,
             secure=auth_settings.ACCESS_SECURE,
             expires=auth_settings.ACCESS_TOKEN_EXPIRE_SECONDS,
+            domain=auth_settings.COOKIE_DOMAIN,
         )
         return tokens
     else:
